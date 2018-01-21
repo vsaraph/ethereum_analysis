@@ -7,40 +7,42 @@ import multiprocessing
 import random
 
 class storage_map:
-	def __init__(self, full=False):
-		# map only keeps track of last reader/write
-		# accesses stores all read/write info
-		self.full = full
-		self.map = {}
-		self.has_write
-		self.accesses = {}
-	def access(self, txn, addr, is_write, abort=True):
+	def __init__(self):
+		self.map = {}		# addr -> txn | None
+		self.has_write = set()
+	def access(self, txn, addr, is_write):
 		if addr not in self.map:
-			self.map[addr] = set([txn])
-			return False
-		else:
-			txns = self.map[addr]
+			# fresh address
+			self.map[addr] = txn
 			if is_write:
-				if type(txns) == type(""):
-					if txns == txn:
-						return False
-					if not abort:
-						self.map
-					return True
+				self.has_write.add(addr)
+			return False	# no conflict
+		if self.map[addr] == txn:
+			# you are the sole reader/writer
+			if is_write:
+				self.has_write.add(addr)
+			return False
+		self.map[addr] = None
+		if not is_write and addr not in self.has_write:
+			# another read - no conflict
+			return False
+		return True
 
-rw_tracer = """{i: 0, data: [],
+# Javascript tracer
+# Get gas price of each op, top of stack to determine storage address
+# (gasPrice is actually gasCost, geth implementation has a bug)
+gas_tracer = """{i: 0, data: [],
 	step: function(log) {
 		opstr = log.op.toString();
 		this.i = this.i + 1;
-		if (opstr == "SSTORE" || opstr == "SLOAD")
-			this.data.push([opstr, log.account, log.stack.peek(0), this.i]);
+		this.data.push([opstr, log.account, log.stack.peek(0), this.i, log.gasPrice]);
 	},
 	result: function() {return this.data; }
 	}"""
 
 # Call debug_traceTransaction
 def trace_transaction(txn):
-	opt = {"tracer": rw_tracer, "timeout": "1h"}
+	opt = {"tracer": gas_tracer, "timeout": "1h"}
 	payload = {"jsonrpc":"2.0", "method":"debug_traceTransaction", "params":[txn, opt], "id": 1}
 	req = requests.post("http://127.0.0.1:8545", json = payload)
 	res = req.json()
