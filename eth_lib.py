@@ -5,6 +5,8 @@ import requests
 import sys
 import multiprocessing
 import random
+import base64
+import json
 
 class StorageMap:
 	def __init__(self):
@@ -37,6 +39,7 @@ class SimEVM:
 		self.storage = StorageMap()		# create simulated storage
 		self.processors = [Processor(self.storage) for n in xrange(N)]	# virtual processors
 		self.stipend = 100		# amount of gas process is given to continue its execution
+		random.shuffle(txns)
 	def run(self):
 		# Initialize processors
 		for proc in self.processors:
@@ -57,10 +60,10 @@ class SimEVM:
 			txn_hash = proc.txn.get_hash()
 			gas_used = proc.get_gas_used()
 			if ret == "FINISHED":
-				print "Transaction %s finished" % txn_hash
+				print "Transaction %s finished with %d" % (txn_hash, gas_used)
 				self.finished[txn_hash] = gas_used
 			elif ret == "ABORTED":
-				print "Transaction %s aborted" % txn_hash
+				print "Transaction %s aborted with %d" % (txn_hash, gas_used)
 				self.aborted[txn_hash] = gas_used
 
 			# replace txn or delete process
@@ -70,6 +73,8 @@ class SimEVM:
 			else:
 				del self.processors[n]
 				N -= 1
+	def crit_path_len(self):
+		return max(self.aborted.values() + self.finished.values())
 
 
 # Processor steps through instructions of given transaction.
@@ -96,6 +101,7 @@ class Processor:
 		if cost <= self.gas:
 			self.gas -= cost
 			self.gas_used += cost
+			#print "Gas used by transaction %s: %s\t%d" % (self.txn.get_hash(), op, cost)
 		else:
 			return "NOGAS"
 		# now check for SSTORE/SLOAD 
@@ -141,25 +147,39 @@ class Transaction:
 		return self.txn_hash
 	def get_addr(self, pc):
 		return (self.trace[pc]["account"], self.trace[pc]["location"])
+	# Change this function when gasCost field is fixed
+	# Currently, CALL gasCost is way off
 	def get_gas(self, pc):
-		return int(self.trace[pc]["cost"])
+		if pc >= self.length - 1:
+			return 0
+		return int(self.trace[pc]["gas_left"]) - int(self.trace[pc+1]["gas_left"])
+		#return self.trace[pc]["cost"]
 
 # Javascript tracer
 # Get gas price of each op, top of stack to determine storage address
-# (gasPrice is actually gasCost, geth implementation has a bug)
+# 
 gas_tracer = """{i: 0, data: [],
 	step: function(log) {
 		opstr = log.op.toString();
 		this.i = this.i + 1;
 		if (log.stack.length() == 0) {loc = null; } else {loc = log.stack.peek(0)}
 		this.data.push({"op": opstr,
-						"account": log.account,
+						"account": toHex(log.contract.getAddress()),
 						"location": loc,
 						"number": this.i,
-						"cost": log.gasPrice});
+						"cost": log.getCost(),
+						"gas_left": log.getGas()});
 	},
-	result: function() {return this.data; }
+	result: function() {return this.data; },
+	fault: function() {}
 	}"""
+
+def trace_transaction2(txn):
+	opt = {"disableStorage": True, "disableMemory": True, "disableStack":True, "timeout": "1h"}
+	payload = {"jsonrpc":"2.0", "method":"debug_traceTransaction", "params":[txn, opt], "id": 1}
+	req = requests.post("http://127.0.0.1:8545", json = payload)
+	res = req.json()
+	return res["result"]
 
 # Call debug_traceTransaction
 def trace_transaction(txn):
@@ -167,9 +187,10 @@ def trace_transaction(txn):
 	payload = {"jsonrpc":"2.0", "method":"debug_traceTransaction", "params":[txn, opt], "id": 1}
 	req = requests.post("http://127.0.0.1:8545", json = payload)
 	res = req.json()
-	print res
 
-	return res["result"]
+	ret = json.loads(base64.b64decode(res["result"]))
+	print ret
+	return ret
 trace_pool = multiprocessing.Pool(8)
 
 # Get transaction hashes and total gas used
@@ -191,10 +212,6 @@ def get_transactions(block):
 # abort the transaction resulting in the conflict.
 # Return a set of transactions for deferral.
 
-N = 64		# number of simulated processors
-step_size = 5		# max step size
-gas_step_size = 5	# max gas step
-
 def execute_block(block):
 	random.seed()
 	# Get transactions (and length of critical path of seq exec)
@@ -215,7 +232,14 @@ def execute_block(block):
 	# Create and run EVM
 	evm = SimEVM(txn_objects)
 	evm.run()
+	print evm.crit_path_len()
+	print int(seq_crit_len, 16)
 
 
 #print trace_transaction("0x90cba76c95b715fbbbc3473f6441a45c5ade78a718de5fd7fde00cf13c254509")
+#tr = trace_transaction2("0xe5c0b9656aba44735008202d975dd4f9ca07db5e7b2ec4611d63237fd45974b0")
+#for rec in tr["structLogs"]:
+#	print rec
+#	if rec["op"] == "CALL":
+#		print "@o@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@"
 execute_block(4000000)
