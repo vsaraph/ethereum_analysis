@@ -29,12 +29,48 @@ class StorageMap:
 		return True
 
 class SimEVM:
-	def __init__(self, N=64):
-		self.aborted = set()	# track aborted txns during execution
+	def __init__(self, txns, N=64):
+		self.txns = txns		# list of txns (Transaction objects) to execute
+		self.n_proc = min(N, len(txns))		# number of processors
+		self.finished = {}	# txn (hashes) successfully completed, and gas used
+		self.aborted = {}	# txn (hashes) aborted, and gas used
 		self.storage = StorageMap()		# create simulated storage
 		self.processors = [Processor(self.storage) for n in xrange(N)]	# virtual processors
+		self.stipend = 100		# amount of gas process is given to continue its execution
 	def run(self):
-		pass 
+		# Initialize processors
+		for proc in self.processors:
+			txn = self.txns.pop(0)
+			proc.new_transaction(txn)
+
+		# End when there are no more running processors
+		N = self.n_proc
+		while self.processors:
+			n = random.randrange(N)
+			proc = self.processors[n]
+			ret = proc.step(self.stipend)
+			# if process is not done, choose another
+			if not ret:
+				continue
+
+			# get gas used
+			txn_hash = proc.txn.get_hash()
+			gas_used = proc.get_gas_used()
+			if ret == "FINISHED":
+				print "Transaction %s finished" % txn_hash
+				self.finished[txn_hash] = gas_used
+			elif ret == "ABORTED":
+				print "Transaction %s aborted" % txn_hash
+				self.aborted[txn_hash] = gas_used
+
+			# replace txn or delete process
+			if self.txns:
+				new_txn = self.txns.pop(0)
+				proc.new_transaction(new_txn)
+			else:
+				del self.processors[n]
+				N -= 1
+
 
 # Processor steps through instructions of given transaction.
 # For each SSTORE or SLOAD, write to given StorageMap object.
@@ -42,9 +78,7 @@ class SimEVM:
 class Processor:
 	def __init__(self, storage):
 		self.reset()
-		self.txn = None
 		self.storage = storage
-		self.is_active = False
 	def reset(self):
 		self.pc = 0
 		self.gas = 0
@@ -91,6 +125,9 @@ class Processor:
 		if ret == "NOGAS":
 			ret = None
 		return ret
+
+	def get_gas_used(self):
+		return self.gas_used
 		
 
 class Transaction:
@@ -159,6 +196,7 @@ step_size = 5		# max step size
 gas_step_size = 5	# max gas step
 
 def execute_block(block):
+	random.seed()
 	# Get transactions (and length of critical path of seq exec)
 	txns, seq_crit_len = get_transactions(block)
 
@@ -169,8 +207,14 @@ def execute_block(block):
 
 	# Save traces
 
-	# Initialize pool
-	
+	# Create Transaction objects
+	txn_objects = []
+	for i, txn in enumerate(txns):
+		txn_objects.append(Transaction(txn, traces[i]))
+
+	# Create and run EVM
+	evm = SimEVM(txn_objects)
+	evm.run()
 
 
 #print trace_transaction("0x90cba76c95b715fbbbc3473f6441a45c5ade78a718de5fd7fde00cf13c254509")
