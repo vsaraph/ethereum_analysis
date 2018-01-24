@@ -203,7 +203,7 @@ class EVMStats:
 		conc_work = seq_work + para_work
 
 		if conc_work != 0:
-			speedup = total_work / conc_work
+			speedup = float(total_work) / conc_work
 		else:
 			speedup = float('nan')
 
