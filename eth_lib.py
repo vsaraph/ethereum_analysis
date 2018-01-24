@@ -43,11 +43,12 @@ class SimEVM:
 		self.n_proc = min(N, len(txns))		# number of processors
 
 		self.txn_gas = {txn.txn_hash: txn.total_gas() for txn in txns}
-		self.aborted_gas = {}	# gas used by txn before aborting
+		self.aborted = set()	# txns aborted
 		self.finished = set()	# txns that execute to completion
 
 		self.storage = StorageMap()		# create simulated storage
 		self.processors = [Processor(self.storage) for n in xrange(self.n_proc)]	# virtual processors
+		self.proc_ids = range(self.n_proc)
 		self.stipend = 100		# amount of gas process is given to continue its execution
 
 		# randomize order of transactions
@@ -59,9 +60,8 @@ class SimEVM:
 			proc.new_transaction(txn)
 
 		# End when there are no more running processors
-		N = self.n_proc
-		while self.processors:
-			n = random.randrange(N)
+		while self.proc_ids:
+			n = random.choice(self.proc_ids)
 			proc = self.processors[n]
 			ret = proc.step(self.stipend)
 			# if process is not done, choose another
@@ -74,24 +74,25 @@ class SimEVM:
 			if ret == "FINISHED":
 				#print "Transaction %s finished with %d" % (txn_hash, gas_used)
 				self.finished.add(txn_hash)
+				proc.update_lifetime()
 			elif ret == "ABORTED":
 				#print "Transaction %s aborted with %d" % (txn_hash, gas_used)
-				self.aborted_gas[txn_hash] = gas_used
+				self.aborted.add(txn_hash)
+				proc.update_lifetime()
 
 			# replace txn or delete process
 			if self.txns:
 				new_txn = self.txns.pop(0)
 				proc.new_transaction(new_txn)
 			else:
-				del self.processors[n]
-				N -= 1
+				self.proc_ids.remove(n)
 
 	def parallel_work(self):
 		# append 0 so that max is defined on empty list
-		return max([0] + [self.txn_gas[txn_hash] for txn_hash in self.finished])
+		return max([0] + [proc.get_lifetime() for proc in self.processors])
 
 	def sequential_work(self):
-		return sum(self.aborted_gas.values())
+		return sum([self.txn_gas[txn_hash] for txn_hash in self.aborted])
 
 	def total_work(self):
 		return sum(self.txn_gas.values())
@@ -104,7 +105,9 @@ class Processor:
 	def __init__(self, storage):
 		self.reset()
 		self.storage = storage
+		self.lifetime_gas = 0
 	def reset(self):
+		# don't reset lifetime_gas
 		self.pc = 0
 		self.gas = 0
 		self.gas_used = 0
@@ -154,6 +157,12 @@ class Processor:
 
 	def get_gas_used(self):
 		return self.gas_used
+
+	def update_lifetime(self):
+		self.lifetime_gas += self.gas_used
+	
+	def get_lifetime(self):
+		return self.lifetime_gas
 		
 
 class Transaction:
@@ -188,7 +197,7 @@ class EVMStats:
 
 	def stats_formatted(self):
 		# percentage aborts
-		aborts = len(self.evm.aborted_gas)
+		aborts = len(self.evm.aborted)
 		total_txns = len(self.evm.txn_gas)
 		
 		if total_txns != 0:
