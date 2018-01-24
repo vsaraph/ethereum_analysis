@@ -7,7 +7,8 @@ import multiprocessing
 import random
 import base64
 import json
-import getpass.getpass()
+import getpass
+import psycopg2
 
 db_server = "db.cs.brown.edu"
 db_name = "ethereum_traces"
@@ -254,9 +255,10 @@ def trace_transaction(txn):
 	req = requests.post("http://127.0.0.1:8545", json = payload)
 	res = req.json()
 
-	ret = json.loads(base64.b64decode(res["result"]))
-	#print ret
-	return ret
+	#ret = json.loads(base64.b64decode(res["result"]))
+	#return ret
+	print "Traced %s" % txn
+	return res["result"]
 trace_pool = multiprocessing.Pool(16)
 
 # Get transaction hashes and total gas used
@@ -269,14 +271,43 @@ def get_transactions(block):
 	return txns
 
 class DBWrapper:
-	def __init__(self):
-		pass
-	def exists(self, block):
-		pass
-	def get_trace(self, block):
-		pass
-	def save_trace(self, block):
-		pass
+	def __init__(self, db_conn):
+		self.db_conn = db_conn
+
+	def block_exists(self, block):
+		cursor = self.db_conn.cursor()
+		cursor.execute("SELECT block from block WHERE block = %s", (block,))
+		if not cursor.fetchone():
+			ret = False
+		else:
+			ret = True
+		cursor.close()
+		return ret
+
+	def get_traces(self, block):
+		cursor = self.db_conn.cursor()
+		cursor.execute("SELECT hash, trace from txn WHERE block = %s", (block,))
+
+		raw_traces = {rec[0]: rec[1] for rec in cursor.fetchall()}
+		cursor.close()
+		return self.decode_traces(raw_traces)
+
+	def decode_traces(self, raw_traces):
+		# base64 decode + (str -> dict)
+		decoder = lambda tr: json.loads(base64.b64decode(tr))
+		return {txn_hash: decoder(trace) for txn_hash, trace in raw_traces.items()}
+
+	def save_traces(self, block, raw_traces):
+		cursor = self.db_conn.cursor()
+		cursor.execute("INSERT INTO block VALUES (%s)", (block,))
+
+		# Save raw traces
+		for txn_hash, raw_trace in raw_traces.items():
+			cursor.execute("INSERT INTO txn VALUES (%s, %s, %s)", (block, txn_hash, raw_trace))
+
+		# Commit and close cursor
+		self.db_conn.commit()
+		cursor.close()
 
 # Execute a block of transactions in the following way:
 # First calculate the trace of each transaction
@@ -292,22 +323,33 @@ class Main:
 		random.seed()
 		self.freq = 10
 		open("output.txt", "w").close()
+		db_conn = psycopg2.connect(host = db_server, dbname = db_name, user = username, password = password)
+		self.db = DBWrapper(db_conn)
+
+	def calculate_traces(self, txns):
+		traces_list = trace_pool.map(trace_transaction, txns)
+		return {txns[i]: traces_list[i] for i in xrange(len(txns))}
 
 	def execute_block(self, block):
 		# Get transactions (and length of critical path of seq exec)
 		txns = get_transactions(block)
 
-		# (TODO) Check whether traces have been computed
-
-		# Compute traces
-		traces = trace_pool.map(trace_transaction, txns)
-
-		# (TODO) Save traces
+		# Check whether traces have been computed
+		# traces: txn_hash -> dict
+		if self.db.block_exists(block):
+			traces = self.db.get_traces(block)
+		else:
+			# Compute traces
+			raw_traces = self.calculate_traces(txns)
+			# Save raw traces
+			self.db.save_traces(block, raw_traces)
+			# Decode traces
+			traces = self.db.decode_traces(raw_traces)
 
 		# Create Transaction objects
 		txn_objects = []
-		for i, txn in enumerate(txns):
-			txn_objects.append(Transaction(txn, traces[i]))
+		for txn_hash, trace in traces.items():
+			txn_objects.append(Transaction(txn_hash, trace))
 
 		# Create and run EVM
 		evm = SimEVM(txn_objects)
@@ -322,7 +364,8 @@ class Main:
 		f.close()
 
 	def execute_range(self, start_block, end_block):
-		for block in xrange(start_block, end_block, self.step):
+		for block in xrange(start_block, end_block, self.freq):
+			print block
 			self.execute_block(block)
 
 #print trace_transaction("0x90cba76c95b715fbbbc3473f6441a45c5ade78a718de5fd7fde00cf13c254509")
@@ -332,5 +375,5 @@ class Main:
 #	if rec["op"] == "CALL":
 #		print "@o@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@"
 m = Main()
-#m.execute_block(4530000)
+#m.execute_block(4000000)
 m.execute_range(4530000, 4570000)
