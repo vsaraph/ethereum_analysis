@@ -7,6 +7,12 @@ import multiprocessing
 import random
 import base64
 import json
+import getpass.getpass()
+
+db_server = "db.cs.brown.edu"
+db_name = "ethereum_traces"
+username = "vsaraph"
+password = getpass.getpass()
 
 class StorageMap:
 	def __init__(self):
@@ -34,11 +40,16 @@ class SimEVM:
 	def __init__(self, txns, N=64):
 		self.txns = txns		# list of txns (Transaction objects) to execute
 		self.n_proc = min(N, len(txns))		# number of processors
-		self.finished = {}	# txn (hashes) successfully completed, and gas used
-		self.aborted = {}	# txn (hashes) aborted, and gas used
+
+		self.txn_gas = {txn.txn_hash: txn.total_gas() for txn in txns}
+		self.aborted_gas = {}	# gas used by txn before aborting
+		self.finished = set()	# txns that execute to completion
+
 		self.storage = StorageMap()		# create simulated storage
-		self.processors = [Processor(self.storage) for n in xrange(N)]	# virtual processors
+		self.processors = [Processor(self.storage) for n in xrange(self.n_proc)]	# virtual processors
 		self.stipend = 100		# amount of gas process is given to continue its execution
+
+		# randomize order of transactions
 		random.shuffle(txns)
 	def run(self):
 		# Initialize processors
@@ -60,11 +71,11 @@ class SimEVM:
 			txn_hash = proc.txn.get_hash()
 			gas_used = proc.get_gas_used()
 			if ret == "FINISHED":
-				print "Transaction %s finished with %d" % (txn_hash, gas_used)
-				self.finished[txn_hash] = gas_used
+				#print "Transaction %s finished with %d" % (txn_hash, gas_used)
+				self.finished.add(txn_hash)
 			elif ret == "ABORTED":
-				print "Transaction %s aborted with %d" % (txn_hash, gas_used)
-				self.aborted[txn_hash] = gas_used
+				#print "Transaction %s aborted with %d" % (txn_hash, gas_used)
+				self.aborted_gas[txn_hash] = gas_used
 
 			# replace txn or delete process
 			if self.txns:
@@ -73,8 +84,16 @@ class SimEVM:
 			else:
 				del self.processors[n]
 				N -= 1
-	def crit_path_len(self):
-		return max(self.aborted.values() + self.finished.values())
+
+	def parallel_work(self):
+		# append 0 so that max is defined on empty list
+		return max([0] + [self.txn_gas[txn_hash] for txn_hash in self.finished])
+
+	def sequential_work(self):
+		return sum(self.aborted_gas.values())
+
+	def total_work(self):
+		return sum(self.txn_gas.values())
 
 
 # Processor steps through instructions of given transaction.
@@ -97,7 +116,7 @@ class Processor:
 			return "FINISHED"
 		# next, check if there is enough gas
 		op = self.txn.get_op(self.pc)
-		cost = self.txn.get_gas(self.pc)
+		cost = self.txn.get_gas_at(self.pc)
 		if cost <= self.gas:
 			self.gas -= cost
 			self.gas_used += cost
@@ -149,15 +168,61 @@ class Transaction:
 		return (self.trace[pc]["account"], self.trace[pc]["location"])
 	# Change this function when gasCost field is fixed
 	# Currently, CALL gasCost is way off
-	def get_gas(self, pc):
+	def get_gas_at(self, pc):
 		if pc >= self.length - 1:
 			return 0
 		return int(self.trace[pc]["gas_left"]) - int(self.trace[pc+1]["gas_left"])
 		#return self.trace[pc]["cost"]
+	def total_gas(self):
+		if not self.trace:
+			return 0
+		return self.trace[0]["gas_left"] - self.trace[-1]["gas_left"]
+
+# namespace
+# could define all methods as static
+class EVMStats:
+	# take evm that has already executed, and calculate numbers
+	def __init__(self, evm):
+		self.evm = evm
+
+	def stats_formatted(self):
+		# percentage aborts
+		aborts = len(self.evm.aborted_gas)
+		total_txns = len(self.evm.txn_gas)
+		
+		if total_txns != 0:
+			percentage = float(aborts) / total_txns
+		else:
+			percentage = float('nan')
+
+		# crit path
+		seq_work = self.evm.sequential_work()
+		para_work = self.evm.parallel_work()
+		total_work = self.evm.total_work()
+		conc_work = seq_work + para_work
+
+		if conc_work != 0:
+			speedup = total_work / conc_work
+		else:
+			speedup = float('nan')
+
+		# return formatted str
+		format_str = "%d\t%d\t%0.2f\t%d\t%d\t%d\t%0.2f"
+		stats = (aborts, total_txns, percentage)
+		stats += (seq_work, para_work, total_work, speedup)
+		return format_str % stats
+
+# get gas used by transaction
+# (this information is not provided in txn objects returned by getBlockByHash)
+def gas_used_by_transaction(txn):
+	payload = {"jsonrpc":"2.0", "method":"eth_getTransactionReceipt", "params":[txn]}
+	req = requests.post("https://127.0.0.1:8545", json = payload)
+	res = req.json()
+
+	return int(res["result"]["gasUsed"], 16)
 
 # Javascript tracer
 # Get gas price of each op, top of stack to determine storage address
-# 
 gas_tracer = """{i: 0, data: [],
 	step: function(log) {
 		opstr = log.op.toString();
@@ -174,14 +239,15 @@ gas_tracer = """{i: 0, data: [],
 	fault: function() {}
 	}"""
 
-def trace_transaction2(txn):
+# default tracer
+def trace_transaction_default(txn):
 	opt = {"disableStorage": True, "disableMemory": True, "disableStack":True, "timeout": "1h"}
 	payload = {"jsonrpc":"2.0", "method":"debug_traceTransaction", "params":[txn, opt], "id": 1}
 	req = requests.post("http://127.0.0.1:8545", json = payload)
 	res = req.json()
 	return res["result"]
 
-# Call debug_traceTransaction
+# Call debug_traceTransaction with custom tracer
 def trace_transaction(txn):
 	opt = {"tracer": gas_tracer, "timeout": "1h"}
 	payload = {"jsonrpc":"2.0", "method":"debug_traceTransaction", "params":[txn, opt], "id": 1}
@@ -189,9 +255,9 @@ def trace_transaction(txn):
 	res = req.json()
 
 	ret = json.loads(base64.b64decode(res["result"]))
-	print ret
+	#print ret
 	return ret
-trace_pool = multiprocessing.Pool(8)
+trace_pool = multiprocessing.Pool(16)
 
 # Get transaction hashes and total gas used
 def get_transactions(block):
@@ -200,8 +266,17 @@ def get_transactions(block):
 	res = req.json()
 
 	txns = [txn["hash"] for txn in res["result"]["transactions"]]
-	gas_used = res["result"]["gasUsed"]
-	return txns, gas_used
+	return txns
+
+class DBWrapper:
+	def __init__(self):
+		pass
+	def exists(self, block):
+		pass
+	def get_trace(self, block):
+		pass
+	def save_trace(self, block):
+		pass
 
 # Execute a block of transactions in the following way:
 # First calculate the trace of each transaction
@@ -212,29 +287,43 @@ def get_transactions(block):
 # abort the transaction resulting in the conflict.
 # Return a set of transactions for deferral.
 
-def execute_block(block):
-	random.seed()
-	# Get transactions (and length of critical path of seq exec)
-	txns, seq_crit_len = get_transactions(block)
+class Main:
+	def __init__(self):
+		random.seed()
+		self.freq = 10
+		open("output.txt", "w").close()
 
-	# Check whether traces have been computed
+	def execute_block(self, block):
+		# Get transactions (and length of critical path of seq exec)
+		txns = get_transactions(block)
 
-	# Compute traces
-	traces = trace_pool.map(trace_transaction, txns)
+		# (TODO) Check whether traces have been computed
 
-	# Save traces
+		# Compute traces
+		traces = trace_pool.map(trace_transaction, txns)
 
-	# Create Transaction objects
-	txn_objects = []
-	for i, txn in enumerate(txns):
-		txn_objects.append(Transaction(txn, traces[i]))
+		# (TODO) Save traces
 
-	# Create and run EVM
-	evm = SimEVM(txn_objects)
-	evm.run()
-	print evm.crit_path_len()
-	print int(seq_crit_len, 16)
+		# Create Transaction objects
+		txn_objects = []
+		for i, txn in enumerate(txns):
+			txn_objects.append(Transaction(txn, traces[i]))
 
+		# Create and run EVM
+		evm = SimEVM(txn_objects)
+		evm.run()
+
+		# get stats and print
+		stats = EVMStats(evm)
+		formatted = stats.stats_formatted()
+
+		f = open("output.txt", "a")
+		f.write(str(block) + '\t' + formatted + '\n')
+		f.close()
+
+	def execute_range(self, start_block, end_block):
+		for block in xrange(start_block, end_block, self.step):
+			self.execute_block(block)
 
 #print trace_transaction("0x90cba76c95b715fbbbc3473f6441a45c5ade78a718de5fd7fde00cf13c254509")
 #tr = trace_transaction2("0xe5c0b9656aba44735008202d975dd4f9ca07db5e7b2ec4611d63237fd45974b0")
@@ -242,4 +331,6 @@ def execute_block(block):
 #	print rec
 #	if rec["op"] == "CALL":
 #		print "@o@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@"
-execute_block(4000000)
+m = Main()
+#m.execute_block(4530000)
+m.execute_range(4530000, 4570000)
