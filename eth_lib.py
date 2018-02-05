@@ -38,18 +38,29 @@ class StorageMap:
 		return True
 
 class SimEVM:
-	def __init__(self, txns, N=64):
+	def __init__(self, txns, is_gas=False, N=64):
+		self.is_gas = is_gas	# running simulation using gas vs # of steps
+
 		self.txns = txns		# list of txns (Transaction objects) to execute
 		self.n_proc = min(N, len(txns))		# number of processors
 
-		self.txn_gas = {txn.txn_hash: txn.total_gas() for txn in txns}
+		# saves total costs based on whether
+		# we are calculating gas or # instructions
+		self.txn_fuel = {}
+		for txn in txns:
+			txn_hash = txn.txn_hash
+			if is_gas:
+				self.txn_fuel[txn_hash] = txn.total_gas()
+			else:
+				self.txn_fuel[txn_hash] = txn.total_inst()
+
 		self.aborted = set()	# txns aborted
 		self.finished = set()	# txns that execute to completion
 
 		self.storage = StorageMap()		# create simulated storage
-		self.processors = [Processor(self.storage) for n in xrange(self.n_proc)]	# virtual processors
+		self.processors = [Processor(self.storage, is_gas) for n in xrange(self.n_proc)]	# virtual processors
 		self.proc_ids = range(self.n_proc)
-		self.stipend = 100		# amount of gas process is given to continue its execution
+		self.stipend = 100 if is_gas else 5		# amount of gas process is given to continue its execution
 
 		# randomize order of transactions
 		random.shuffle(txns)
@@ -68,9 +79,8 @@ class SimEVM:
 			if not ret:
 				continue
 
-			# get gas used
+			# update numbers
 			txn_hash = proc.txn.get_hash()
-			gas_used = proc.get_gas_used()
 			if ret == "FINISHED":
 				#print "Transaction %s finished with %d" % (txn_hash, gas_used)
 				self.finished.add(txn_hash)
@@ -86,31 +96,35 @@ class SimEVM:
 				proc.new_transaction(new_txn)
 			else:
 				self.proc_ids.remove(n)
-
+	
 	def parallel_work(self):
 		# append 0 so that max is defined on empty list
 		return max([0] + [proc.get_lifetime() for proc in self.processors])
 
 	def sequential_work(self):
-		return sum([self.txn_gas[txn_hash] for txn_hash in self.aborted])
+		return sum([self.txn_fuel[txn_hash] for txn_hash in self.aborted])
 
 	def total_work(self):
-		return sum(self.txn_gas.values())
+		return sum(self.txn_fuel.values())
 
 
 # Processor steps through instructions of given transaction.
 # For each SSTORE or SLOAD, write to given StorageMap object.
 # If conflict is encountered, stepper should communicate this.
+# Can measure work using gas or # of instructions
+# `fuel` is either gas or instruction count
 class Processor:
-	def __init__(self, storage):
+	def __init__(self, storage, is_gas=False):
+		# 'fuel' refers to either gas or instruction count
+		self.is_gas = is_gas
 		self.reset()
 		self.storage = storage
-		self.lifetime_gas = 0
+		self.lifetime_work = 0
 	def reset(self):
-		# don't reset lifetime_gas
+		# don't reset lifetime_work
 		self.pc = 0
-		self.gas = 0
-		self.gas_used = 0
+		self.fuel = 0	# gas | instruction count
+		self.work_done = 0
 	def new_transaction(self, txn):
 		self.reset()
 		self.txn = txn
@@ -118,15 +132,20 @@ class Processor:
 		# first check if txn has finished
 		if self.pc >= self.txn.length:
 			return "FINISHED"
+
 		# next, check if there is enough gas
 		op = self.txn.get_op(self.pc)
-		cost = self.txn.get_gas_at(self.pc)
-		if cost <= self.gas:
-			self.gas -= cost
-			self.gas_used += cost
-			#print "Gas used by transaction %s: %s\t%d" % (self.txn.get_hash(), op, cost)
+		if self.is_gas:
+			cost = self.txn.get_gas_at(self.pc)
 		else:
-			return "NOGAS"
+			cost = 1
+
+		if cost <= self.fuel:
+			self.fuel -= cost
+			self.work_done += cost
+		else:
+			return "NOFUEL"
+
 		# now check for SSTORE/SLOAD 
 		txn_hash = self.txn.get_hash()
 		addr = self.txn.get_addr(self.pc)
@@ -137,32 +156,30 @@ class Processor:
 				conf = self.storage.access(txn_hash, addr, False)
 			if conf:
 				return "ABORTED"
+
 		# move counter up
 		self.pc += 1
 		return None
 
 	def step(self, stipend):
-		# give a small stipend of gas
+		# give a small stipend of fuel
 		# returns either None, "FINISHED", or "ABORTED"
-		self.gas += stipend
-		# Run until "NOGAS". If "FINISHED" or "ABORTED"
+		self.fuel += stipend
+		# Run until "NOFUEL". If "FINISHED" or "ABORTED"
 		# is encountered instead, stop and return that value.
 		while True:
 			ret = self.step_instruction()
 			if ret != None:
 				break
-		if ret == "NOGAS":
+		if ret == "NOFUEL":
 			ret = None
 		return ret
 
-	def get_gas_used(self):
-		return self.gas_used
-
 	def update_lifetime(self):
-		self.lifetime_gas += self.gas_used
+		self.lifetime_work += self.work_done
 	
 	def get_lifetime(self):
-		return self.lifetime_gas
+		return self.lifetime_work
 		
 
 class Transaction:
@@ -182,11 +199,12 @@ class Transaction:
 		if pc >= self.length - 1:
 			return 0
 		return int(self.trace[pc]["gas_left"]) - int(self.trace[pc+1]["gas_left"])
-		#return self.trace[pc]["cost"]
 	def total_gas(self):
 		if not self.trace:
 			return 0
 		return self.trace[0]["gas_left"] - self.trace[-1]["gas_left"]
+	def total_inst(self):
+		return len(self.trace)
 
 # namespace
 # could define all methods as static
@@ -198,7 +216,7 @@ class EVMStats:
 	def stats_formatted(self):
 		# percentage aborts
 		aborts = len(self.evm.aborted)
-		total_txns = len(self.evm.txn_gas)
+		total_txns = len(self.evm.txn_fuel)
 		
 		if total_txns != 0:
 			percentage = float(aborts) / total_txns
@@ -276,6 +294,7 @@ def get_transactions(block):
 	req = requests.post("http://127.0.0.1:8545", json = payload)
 	res = req.json()
 
+	#print res
 	txns = [txn["hash"] for txn in res["result"]["transactions"]]
 	return txns
 
@@ -384,5 +403,6 @@ class Main:
 #	if rec["op"] == "CALL":
 #		print "@o@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@"
 m = Main()
-#m.execute_block(4000000)
-m.execute_range(4530000, 4570000)
+# 4551720
+#m.execute_block(4551730)
+m.execute_range(4330000, 4380000)
