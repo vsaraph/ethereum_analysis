@@ -7,13 +7,9 @@ import multiprocessing
 import random
 import base64
 import json
-import getpass
-import psycopg2
+import sqlite3
 
-db_server = "db.cs.brown.edu"
-db_name = "ethereum_traces"
-username = "vsaraph"
-password = getpass.getpass()
+db_name = "/data/ethereum/ethereum_traces.db"
 
 class StorageMap:
 	def __init__(self):
@@ -106,6 +102,10 @@ class SimEVM:
 
 	def total_work(self):
 		return sum(self.txn_fuel.values())
+
+	def print_processor_work(self):
+		for proc in self.processors:
+			print proc.get_lifetime()
 
 
 # Processor steps through instructions of given transaction.
@@ -298,13 +298,15 @@ def get_transactions(block):
 	txns = [txn["hash"] for txn in res["result"]["transactions"]]
 	return txns
 
+# Rewritten to use SQLite instead, since all those inserts
+# were trashing tstaff's postgres log files
 class DBWrapper:
 	def __init__(self, db_conn):
 		self.db_conn = db_conn
 
 	def block_exists(self, block):
 		cursor = self.db_conn.cursor()
-		cursor.execute("SELECT block from block WHERE block = %s", (block,))
+		cursor.execute("SELECT block FROM block WHERE block = ?", (block,))
 		if not cursor.fetchone():
 			ret = False
 		else:
@@ -314,7 +316,7 @@ class DBWrapper:
 
 	def get_traces(self, block):
 		cursor = self.db_conn.cursor()
-		cursor.execute("SELECT hash, trace from txn WHERE block = %s", (block,))
+		cursor.execute("SELECT hash, trace FROM txn WHERE block = ?", (block,))
 
 		raw_traces = {rec[0]: rec[1] for rec in cursor.fetchall()}
 		cursor.close()
@@ -327,15 +329,21 @@ class DBWrapper:
 
 	def save_traces(self, block, raw_traces):
 		cursor = self.db_conn.cursor()
-		cursor.execute("INSERT INTO block VALUES (%s)", (block,))
+		cursor.execute("INSERT INTO block VALUES (?)", (block,))
 
 		# Save raw traces
 		for txn_hash, raw_trace in raw_traces.items():
-			cursor.execute("INSERT INTO txn VALUES (%s, %s, %s)", (block, txn_hash, raw_trace))
+			cursor.execute("INSERT INTO txn VALUES (?, ?, ?)", (block, txn_hash, raw_trace))
 
 		# Commit and close cursor
 		self.db_conn.commit()
 		cursor.close()
+
+# SQLite is slow, use plain text files instead
+# Same API as DBWrapper
+class FSWrapper:
+	def __init__(self, datadir):
+		self.datadir = datadir
 
 # Execute a block of transactions in the following way:
 # First calculate the trace of each transaction
@@ -351,7 +359,7 @@ class Main:
 		random.seed()
 		self.freq = 10
 		open("output.txt", "w").close()
-		db_conn = psycopg2.connect(host = db_server, dbname = db_name, user = username, password = password)
+		db_conn = sqlite3.connect(db_name)
 		self.db = DBWrapper(db_conn)
 
 	def calculate_traces(self, txns):
@@ -404,5 +412,5 @@ class Main:
 #		print "@o@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@"
 m = Main()
 # 4551720
-#m.execute_block(4551730)
+#m.execute_block(4330000)
 m.execute_range(4330000, 4380000)
