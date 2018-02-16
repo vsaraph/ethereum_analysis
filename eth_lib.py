@@ -1,4 +1,4 @@
-# Vi.kram Saraph
+# Vikram Saraph
 # Python library for interacting with geth blockchain
 
 import requests
@@ -8,8 +8,27 @@ import random
 import base64
 import json
 import sqlite3
+import os
+import glob
 
 db_name = "/data/ethereum/ethereum_traces.db"
+
+class DataDir:
+	def __init__(self, path):
+		self.path = path
+		if path[-1] != '/' or not os.path.exists(path):
+			raise IOError
+		self.clear()
+
+	# create and return new file handle
+	def new_file(self, name):
+		return open(self.path + name, 'w')
+
+	# clear all files
+	def clear(self):
+		files = glob.glob(self.path + '*')
+		#for f in files:
+		#	os.remove(f)
 
 class StorageMap:
 	def __init__(self):
@@ -34,9 +53,10 @@ class StorageMap:
 		return True
 
 class SimEVM:
-	def __init__(self, txns, is_gas=False, N=64):
+	def __init__(self, block, txns, is_gas=False, N=64):
 		self.is_gas = is_gas	# running simulation using gas vs # of steps
 
+		self.block = block
 		self.txns = txns		# list of txns (Transaction objects) to execute
 		self.n_proc = min(N, len(txns))		# number of processors
 
@@ -49,6 +69,7 @@ class SimEVM:
 				self.txn_fuel[txn_hash] = txn.total_gas()
 			else:
 				self.txn_fuel[txn_hash] = txn.total_inst()
+		self.save_message_calls()
 
 		self.aborted = set()	# txns aborted
 		self.finished = set()	# txns that execute to completion
@@ -92,7 +113,7 @@ class SimEVM:
 				proc.new_transaction(new_txn)
 			else:
 				self.proc_ids.remove(n)
-	
+
 	def parallel_work(self):
 		# append 0 so that max is defined on empty list
 		return max([0] + [proc.get_lifetime() for proc in self.processors])
@@ -103,9 +124,15 @@ class SimEVM:
 	def total_work(self):
 		return sum(self.txn_fuel.values())
 
-	def print_processor_work(self):
-		for proc in self.processors:
-			print proc.get_lifetime()
+	# histories of all processors (for gantt charts)
+	def get_histories(self):
+		return [proc.get_history() for proc in self.processors]
+
+	def save_message_calls(self):
+		self.message_calls = 0
+		for txn in self.txns:
+			if txn.trace:
+				self.message_calls += 1
 
 
 # Processor steps through instructions of given transaction.
@@ -120,6 +147,7 @@ class Processor:
 		self.reset()
 		self.storage = storage
 		self.lifetime_work = 0
+		self.work_history = []	# list of inst per txn
 	def reset(self):
 		# don't reset lifetime_work
 		self.pc = 0
@@ -175,12 +203,18 @@ class Processor:
 			ret = None
 		return ret
 
+	# update total work done by processor
+	# and add work for sinle txn to history
 	def update_lifetime(self):
 		self.lifetime_work += self.work_done
+		self.work_history.append(self.work_done)
 	
 	def get_lifetime(self):
 		return self.lifetime_work
-		
+
+	# return history (for making gantt charts)
+	def get_history(self):
+		return self.work_history
 
 class Transaction:
 	def __init__(self, txn_hash, trace):
@@ -210,18 +244,25 @@ class Transaction:
 # could define all methods as static
 class EVMStats:
 	# take evm that has already executed, and calculate numbers
-	def __init__(self, evm):
+	def __init__(self, evm, gantt_dir = "/home/vsaraph/ethereum_analysis/gantt_data/"):
 		self.evm = evm
+		self.gantt_dir = DataDir(gantt_dir)
 
 	def stats_formatted(self):
 		# percentage aborts
 		aborts = len(self.evm.aborted)
 		total_txns = len(self.evm.txn_fuel)
+		message_calls = self.evm.message_calls
 		
 		if total_txns != 0:
 			percentage = float(aborts) / total_txns
 		else:
 			percentage = float('nan')
+
+		if message_calls != 0:
+			percentage_mc = float(aborts) / message_calls
+		else:
+			percentage_mc = float('nan')
 
 		# crit path
 		seq_work = self.evm.sequential_work()
@@ -235,10 +276,24 @@ class EVMStats:
 			speedup = float('nan')
 
 		# return formatted str
-		format_str = "%d\t%d\t%0.2f\t%d\t%d\t%d\t%0.2f"
-		stats = (aborts, total_txns, percentage)
+		format_str = "%d\t%d\t%0.2f\t%d\t%0.2f\t%d\t%d\t%d\t%0.2f"
+		stats = (aborts, total_txns, percentage, message_calls, percentage_mc)
 		stats += (seq_work, para_work, total_work, speedup)
 		return format_str % stats
+
+	def save_gantt_stats(self):
+		histories = self.evm.get_histories()
+		data_file = self.gantt_dir.new_file(str(self.evm.block) + ".csv")
+
+		for proc, hist in enumerate(histories):
+			accum = 0
+			for n in hist:
+				if n == 0:
+					continue
+				data_file.write("%d,%d,%d\n" % (proc, accum, n))
+				accum += n
+
+		data_file.close()
 
 # get gas used by transaction
 # (this information is not provided in txn objects returned by getBlockByHash)
@@ -388,12 +443,13 @@ class Main:
 			txn_objects.append(Transaction(txn_hash, trace))
 
 		# Create and run EVM
-		evm = SimEVM(txn_objects)
+		evm = SimEVM(block, txn_objects)
 		evm.run()
 
 		# get stats and print
 		stats = EVMStats(evm)
 		formatted = stats.stats_formatted()
+		stats.save_gantt_stats()
 
 		f = open("output.txt", "a")
 		f.write(str(block) + '\t' + formatted + '\n')

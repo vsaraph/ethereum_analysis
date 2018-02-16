@@ -1,0 +1,3 @@
+- Decouple transaction tracing and processing
+- Split up eth_lib.py into modular files
+- Delete other files?
