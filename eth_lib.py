@@ -10,6 +10,7 @@ import json
 import sqlite3
 import os
 import glob
+import copy
 
 db_name = "/data/ethereum/ethereum_traces.db"
 
@@ -32,6 +33,8 @@ class DataDir:
 
 class StorageMap:
 	def __init__(self):
+		self.reset()
+	def reset(self):
 		self.map = {}		# addr -> txn | None
 		self.has_write = set()
 	def access(self, txn, addr, is_write):
@@ -52,16 +55,19 @@ class StorageMap:
 			return False
 		return True
 
+
 class SimEVM:
-	def __init__(self, block, txns, is_gas=False, N=64):
-		self.is_gas = is_gas	# running simulation using gas vs # of steps
+	def __init__(self, block, txns, bins=2, is_gas=False, N=64, gantt_dir = "/home/vsaraph/ethereum_analysis/gantt_data/"):
+		self.is_gas = is_gas	# run simulation using gas or # inst
 
-		self.block = block
-		self.txns = txns		# list of txns (Transaction objects) to execute
-		self.n_proc = min(N, len(txns))		# number of processors
+		self.block = block		# used by EVMStats
+		self.txns = txns		# list of all Transaction objects to execute
+		self.n_proc = N			# number of processors per bin
+		self.bins = bins		# number of bins
+		self.bin_work = []		# work per bin
+		self.aborted = []		# aborted
 
-		# saves total costs based on whether
-		# we are calculating gas or # instructions
+		# calculate cost of each transaction
 		self.txn_fuel = {}
 		for txn in txns:
 			txn_hash = txn.txn_hash
@@ -69,23 +75,94 @@ class SimEVM:
 				self.txn_fuel[txn_hash] = txn.total_gas()
 			else:
 				self.txn_fuel[txn_hash] = txn.total_inst()
-		self.save_message_calls()
 
-		self.aborted = set()	# txns aborted
-		self.finished = set()	# txns that execute to completion
+		# create gantt dir object
+		self.gantt_dir = DataDir(gantt_dir)
 
-		self.storage = StorageMap()		# create simulated storage
-		self.processors = [Processor(self.storage, is_gas) for n in xrange(self.n_proc)]	# virtual processors
+	# Run several rounds
+	def run(self):
+		aborted = self.txns
+		for b in xrange(self.bins):
+			# run one parallel bin
+			para_bin = ParallelBin(aborted, self.is_gas, self.n_proc)
+			aborted = para_bin.run()
+
+			# get (parallel) work of bin
+			self.bin_work.append(para_bin.get_work())
+
+			# save gantt data
+			histories = para_bin.get_histories()
+			self.save_gantt_stats(b, histories)
+
+		# remaining txns should be run sequentially
+		self.aborted = aborted
+
+	# total by parallel bins
+	def parallel_work(self):
+		return sum(self.bin_work)
+
+	# work by sequential transactions
+	def sequential_work(self):
+		return sum([self.txn_fuel[txn_hash] for txn_hash in self.aborted])
+
+	# total work by a regular EVM
+	def total_work(self):
+		return sum(self.txn_fuel.values())
+
+	# Number of message calls
+	def get_message_calls(self):
+		message_calls = 0
+		for txn in self.txns:
+			if txn.trace:
+				message_calls += 1
+		return message_calls
+
+	# write to file (one for each bin)
+	def save_gantt_stats(self, binn, histories):
+		data_file = self.gantt_dir.new_file("%d.%d.csv" % (self.block, binn))
+
+		for proc, hist in enumerate(histories):
+			accum = 0
+			for n in hist:
+				if n == 0:
+					continue
+				data_file.write("%d,%d,%d\n" % (proc, accum, n))
+				accum += n
+
+		data_file.close()
+
+class ParallelBin:
+	def __init__(self, txns, is_gas, N):
+		self.is_gas = is_gas	# running simulation using gas vs # of steps
+		self.n_proc = min(N, len(txns))		# use only number of processors needed
+
+		# create a shallow copy of the txns list (will be popped from )
+		# randomize order
+		self.txns = copy.copy(txns)
+		random.shuffle(self.txns)
+
+		# create storage
+		self.storage = StorageMap()
+
+		# create processors
+		self.processors = [Processor(self.storage, is_gas) for n in xrange(self.n_proc)]
 		self.proc_ids = range(self.n_proc)
-		self.stipend = 100 if is_gas else 5		# amount of gas process is given to continue its execution
 
-		# randomize order of transactions
-		random.shuffle(txns)
+		# define stipend
+		# fuel allocated for each step
+		self.stipend = 100 if is_gas else 5	
+
+	# Run one parallel round
+	# returns aborted transactions
 	def run(self):
 		# Initialize processors
 		for proc in self.processors:
 			txn = self.txns.pop(0)
 			proc.new_transaction(txn)
+
+		# record which transactions abort
+		aborted = []
+		#finished = []
 
 		# End when there are no more running processors
 		while self.proc_ids:
@@ -97,42 +174,31 @@ class SimEVM:
 				continue
 
 			# update numbers
-			txn_hash = proc.txn.get_hash()
 			if ret == "FINISHED":
-				#print "Transaction %s finished with %d" % (txn_hash, gas_used)
-				self.finished.add(txn_hash)
+				#finished.append(proc.txn)
 				proc.update_lifetime()
 			elif ret == "ABORTED":
-				#print "Transaction %s aborted with %d" % (txn_hash, gas_used)
-				self.aborted.add(txn_hash)
+				aborted.append(proc.txn)
 				proc.update_lifetime()
 
-			# replace txn or delete process
+			# get new txn or delete process
 			if self.txns:
 				new_txn = self.txns.pop(0)
 				proc.new_transaction(new_txn)
 			else:
 				self.proc_ids.remove(n)
+			
+		# return aborted txns (to be passed to next round)
+		return aborted
 
-	def parallel_work(self):
+	def get_work(self):
 		# append 0 so that max is defined on empty list
 		return max([0] + [proc.get_lifetime() for proc in self.processors])
-
-	def sequential_work(self):
-		return sum([self.txn_fuel[txn_hash] for txn_hash in self.aborted])
-
-	def total_work(self):
-		return sum(self.txn_fuel.values())
 
 	# histories of all processors (for gantt charts)
 	def get_histories(self):
 		return [proc.get_history() for proc in self.processors]
 
-	def save_message_calls(self):
-		self.message_calls = 0
-		for txn in self.txns:
-			if txn.trace:
-				self.message_calls += 1
 
 
 # Processor steps through instructions of given transaction.
@@ -148,14 +214,17 @@ class Processor:
 		self.storage = storage
 		self.lifetime_work = 0
 		self.work_history = []	# list of inst per txn
+
 	def reset(self):
 		# don't reset lifetime_work
 		self.pc = 0
 		self.fuel = 0	# gas | instruction count
 		self.work_done = 0
+
 	def new_transaction(self, txn):
 		self.reset()
 		self.txn = txn
+
 	def step_instruction(self):
 		# first check if txn has finished
 		if self.pc >= self.txn.length:
@@ -244,15 +313,14 @@ class Transaction:
 # could define all methods as static
 class EVMStats:
 	# take evm that has already executed, and calculate numbers
-	def __init__(self, evm, gantt_dir = "/home/vsaraph/ethereum_analysis/gantt_data/"):
+	def __init__(self, evm):
 		self.evm = evm
-		self.gantt_dir = DataDir(gantt_dir)
 
 	def stats_formatted(self):
 		# percentage aborts
 		aborts = len(self.evm.aborted)
 		total_txns = len(self.evm.txn_fuel)
-		message_calls = self.evm.message_calls
+		message_calls = self.evm.get_message_calls()
 		
 		if total_txns != 0:
 			percentage = float(aborts) / total_txns
@@ -281,28 +349,6 @@ class EVMStats:
 		stats += (seq_work, para_work, total_work, speedup)
 		return format_str % stats
 
-	def save_gantt_stats(self):
-		histories = self.evm.get_histories()
-		data_file = self.gantt_dir.new_file(str(self.evm.block) + ".csv")
-
-		for proc, hist in enumerate(histories):
-			accum = 0
-			for n in hist:
-				if n == 0:
-					continue
-				data_file.write("%d,%d,%d\n" % (proc, accum, n))
-				accum += n
-
-		data_file.close()
-
-# get gas used by transaction
-# (this information is not provided in txn objects returned by getBlockByHash)
-def gas_used_by_transaction(txn):
-	payload = {"jsonrpc":"2.0", "method":"eth_getTransactionReceipt", "params":[txn]}
-	req = requests.post("https://127.0.0.1:8545", json = payload)
-	res = req.json()
-
-	return int(res["result"]["gasUsed"], 16)
 
 # Javascript tracer
 # Get gas price of each op, top of stack to determine storage address
@@ -333,6 +379,7 @@ def trace_transaction_default(txn):
 # Call debug_traceTransaction with custom tracer
 def trace_transaction(txn):
 	opt = {"tracer": gas_tracer, "timeout": "1h"}
+	print "Tracing %s" % txn
 	payload = {"jsonrpc":"2.0", "method":"debug_traceTransaction", "params":[txn, opt], "id": 1}
 	req = requests.post("http://127.0.0.1:8545", json = payload)
 	res = req.json()
@@ -394,7 +441,7 @@ class DBWrapper:
 		self.db_conn.commit()
 		cursor.close()
 
-# SQLite is slow, use plain text files instead
+# SQLite is slow, use plain text files instead?
 # Same API as DBWrapper
 class FSWrapper:
 	def __init__(self, datadir):
@@ -421,7 +468,7 @@ class Main:
 		traces_list = trace_pool.map(trace_transaction, txns)
 		return {txns[i]: traces_list[i] for i in xrange(len(txns))}
 
-	def execute_block(self, block):
+	def execute_block(self, block, trace_only = False):
 		# Get transactions (and length of critical path of seq exec)
 		txns = get_transactions(block)
 
@@ -437,19 +484,22 @@ class Main:
 			# Decode traces
 			traces = self.db.decode_traces(raw_traces)
 
+		# if only calculating traces, return
+		if trace_only:
+			return
+
 		# Create Transaction objects
 		txn_objects = []
 		for txn_hash, trace in traces.items():
 			txn_objects.append(Transaction(txn_hash, trace))
 
 		# Create and run EVM
-		evm = SimEVM(block, txn_objects)
+		evm = SimEVM(block, txn_objects, True)
 		evm.run()
 
 		# get stats and print
 		stats = EVMStats(evm)
 		formatted = stats.stats_formatted()
-		stats.save_gantt_stats()
 
 		f = open("output.txt", "a")
 		f.write(str(block) + '\t' + formatted + '\n')
@@ -469,4 +519,5 @@ class Main:
 m = Main()
 # 4551720
 #m.execute_block(4330000)
-m.execute_range(4330000, 4380000)
+#m.execute_range(4380000, 4430000)
+m.execute_range(2681540, 2683000)
