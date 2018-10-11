@@ -9,6 +9,7 @@ config = yaml.safe_load(open("config.yml"))
 
 class SimulatedEVM:
     def __init__(self, block, bins, n_proc, is_gas=False):
+        self.block = block
         self.is_gas = is_gas	    # run simulation using gas or # inst
 
         # Fetch transactions from database
@@ -91,14 +92,15 @@ class SimulatedEVM:
             speedup = float('nan')
 
         # return formatted str
-        format_str = "%d\t%d\t%0.2f\t%d\t%0.2f\t%d\t%d\t%d\t%0.2f\n"
-        stats = (aborts, total_txns, percentage_tx, message_calls, percentage_mc)
+        format_str = "%d\t%d\t%d\t%0.2f\t%d\t%0.2f\t%d\t%d\t%d\t%0.2f\n"
+        stats = (self.block, aborts, total_txns, percentage_tx, message_calls, percentage_mc)
         stats += (sequential_phase_work, parallel_phase_work, sequential_evm_work, speedup)
 
         open(filename, 'a').write(format_str % stats)
 
 if __name__ == "__main__":
-    for b in xrange(525700, 525710):
-        evm = SimulatedEVM(b, 1, 4)
+    open("d8e8fca2dc0f896fd7cb4cb0031ba249.txt", 'w').close()
+    for b in xrange(4688000, 4688100, 10):
+        evm = SimulatedEVM(b, 1, 16)
         evm.run()
-        evm.write_statistics("test.txt")
+        evm.write_statistics("d8e8fca2dc0f896fd7cb4cb0031ba249.txt")
