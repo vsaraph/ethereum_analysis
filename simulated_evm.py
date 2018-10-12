@@ -127,7 +127,10 @@ class SimulatedEVM:
 
 if __name__ == "__main__":
     open("d8e8fca2dc0f896fd7cb4cb0031ba249.txt", 'w').close()
-    for b in xrange(4688000, 4688100, 10):
+    start = 3566000
+	#start = 4688000 
+    end = start + 1000
+    for b in xrange(start, end, 10):
         evm = SimulatedEVM(b, 1, 16)
         evm.run()
         evm.write_statistics("d8e8fca2dc0f896fd7cb4cb0031ba249.txt")
