@@ -22,13 +22,13 @@ class SimulatedEVM:
         self.aborted = []		    # aborted
 
         # calculate cost of each transaction
-        self.txn_fuel = {}
+        self.txn_cost = {}
         for txn in self.txns:
             txn_hash = txn.txn_hash
             if is_gas:
-                self.txn_fuel[txn_hash] = txn.total_gas()
+                self.txn_cost[txn_hash] = txn.total_gas()
             else:
-                self.txn_fuel[txn_hash] = txn.instruction_count()
+                self.txn_cost[txn_hash] = txn.instruction_count()
 
     # Run several rounds of ParallelBins
     def run(self):
@@ -49,11 +49,11 @@ class SimulatedEVM:
 
     # Work by sequential transactions
     def sequential_phase_work(self):
-        return sum([self.txn_fuel[txn.txn_hash] for txn in self.aborted])
+        return sum([self.txn_cost[txn.txn_hash] for txn in self.aborted])
 
     # Work done by a regular EVM
     def sequential_evm_work(self):
-        return sum(self.txn_fuel.values())
+        return sum(self.txn_cost.values())
 
     # Number of message calls
     def get_message_calls(self):
@@ -63,11 +63,23 @@ class SimulatedEVM:
                 message_calls += 1
         return message_calls
 
+    def perfect_speedup(self):
+        costs = reversed(sorted(txn_cost.values()))
+        work_per_process = self.n_proc * [0]
+        for cost in costs:
+            argmin = min([(w, i) for i, w in enumerate(work_per_process)])[1]
+            work_per_process[argmin] += cost
+
+        print [cost for cost in costs]
+        print work_per_process
+
+        return sum(costs) / max(work_per_process)
+
     # Append statistics to a given file
     def write_statistics(self, filename):
         # percentage aborts
         aborts = len(self.aborted)
-        total_txns = len(self.txn_fuel)
+        total_txns = len(self.txn_cost)
         message_calls = self.get_message_calls()
 
         if total_txns != 0:
@@ -95,6 +107,8 @@ class SimulatedEVM:
         format_str = "%d\t%d\t%d\t%0.2f\t%d\t%0.2f\t%d\t%d\t%d\t%0.2f\n"
         stats = (self.block, aborts, total_txns, percentage_tx, message_calls, percentage_mc)
         stats += (sequential_phase_work, parallel_phase_work, sequential_evm_work, speedup)
+
+        self.perfect_speedup()
 
         open(filename, 'a').write(format_str % stats)
 
