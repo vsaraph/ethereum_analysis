@@ -63,6 +63,12 @@ class SimulatedEVM:
                 message_calls += 1
         return message_calls
 
+    def unique_contract_count(self):
+        unique = set()
+        for txn in self.txns:
+            if txn.trace:
+                print txn.trace[0]
+
     def perfect_speedup(self):
         costs = sorted(self.txn_cost.values(), reverse=True)
         work_per_processor = self.n_proc * [0]
