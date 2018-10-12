@@ -63,11 +63,16 @@ class SimulatedEVM:
                 message_calls += 1
         return message_calls
 
-    def unique_contract_count(self):
+    def unique_contract_ratio(self):
         unique = set()
         for txn in self.txns:
             if txn.trace:
-                print txn.trace[0]
+                unique.add(txn.trace[0]["account"])
+        mc = self.get_message_calls()
+        if (mc > 0):
+		    return float(len(unique)) / self.get_message_calls()
+        else:
+            return float('nan')
 
     def perfect_speedup(self):
         costs = sorted(self.txn_cost.values(), reverse=True)
@@ -115,6 +120,7 @@ class SimulatedEVM:
         stats = (self.block, aborts, total_txns, percentage_tx, message_calls, percentage_mc)
         stats += (sequential_phase_work, parallel_phase_work, sequential_evm_work, speedup)
         stats += (self.perfect_speedup(),)
+        print self.unique_contract_ratio()
 
         open(filename, 'a').write(format_str % stats)
 
