@@ -51,3 +51,6 @@ class Storage:
             # another read - no conflict
             return False
         return self.conflict_at(addr)
+
+    def hotspot_count(self, threshold):
+        return len([addr for addr, count in self.conflicts.items() if count >= threshold])
