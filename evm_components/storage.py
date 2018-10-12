@@ -3,14 +3,22 @@
 
 
 class Storage:
-    def __init__(self, exclusive = False):
+    def __init__(self, exclusive=False):
         self.map = {}
         self.has_write = set()
         self.exclusive = exclusive
+        self.conflicts = {}
 
     def reset(self):
         self.map = {}
         self.has_write = set()
+
+    def conflict_at(self, addr):
+        if addr in self.conflicts:
+            self.conflicts[addr] += 1
+        else:
+            self.conflicts[addr] = 1
+        return True
 
     def access(self, txn_hash, addr, is_write):
         # exclusive
@@ -24,7 +32,7 @@ class Storage:
                 return False
             else:
                 # conflict
-                return True
+                return self.conflict_at(addr)
 
         # non-exclusive
         if addr not in self.map:
@@ -42,4 +50,4 @@ class Storage:
         if not is_write and addr not in self.has_write:
             # another read - no conflict
             return False
-        return True
+        return self.conflict_at(addr)
