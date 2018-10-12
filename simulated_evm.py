@@ -64,12 +64,13 @@ class SimulatedEVM:
         return message_calls
 
     def perfect_speedup(self):
-        costs = reversed(sorted(txn_cost.values()))
+        costs = reversed(sorted(self.txn_cost.values()))
         work_per_process = self.n_proc * [0]
         for cost in costs:
             argmin = min([(w, i) for i, w in enumerate(work_per_process)])[1]
             work_per_process[argmin] += cost
 
+        print self.txn_cost.values()
         print [cost for cost in costs]
         print work_per_process
 
