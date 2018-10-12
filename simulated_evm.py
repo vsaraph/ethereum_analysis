@@ -64,13 +64,17 @@ class SimulatedEVM:
         return message_calls
 
     def perfect_speedup(self):
-        costs = reversed(sorted(self.txn_cost.values()))
-        work_per_process = self.n_proc * [0]
+        costs = sorted(self.txn_cost.values(), reverse=True)
+        work_per_processor = self.n_proc * [0]
         for cost in costs:
-            argmin = min([(w, i) for i, w in enumerate(work_per_process)])[1]
-            work_per_process[argmin] += cost
+            argmin = min([(w, i) for i, w in enumerate(work_per_processor)])[1]
+            work_per_processor[argmin] += cost
 
-        return float(sum(costs)) / max(work_per_process)
+        longest = max(work_per_processor)
+        if longest > 0:
+            return float(sum(costs)) / longest
+        else:
+            return float('nan')
 
     # Append statistics to a given file
     def write_statistics(self, filename):
