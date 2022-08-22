@@ -76,10 +76,10 @@ if __name__ == "__main__":
     db.store_block(sample_block, {-1: "eyJ0ZXN0IjogInRlc3QifQ=="})
     
     if not db.block_exists(sample_block):
-        print "Block does not exist!"
+        print("Block does not exist!")
         sys.exit(1)
     
-    print "Block exists!"
+    print("Block exists!")
     for txn_hash, trace in db.load_block(sample_block).items():
-        print txn_hash, trace
+        print(txn_hash, trace)
 

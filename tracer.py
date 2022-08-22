@@ -21,7 +21,7 @@ geth_json_rpc_endpoint = config["geth_json_rpc_endpoint"]
 # Change this later to use an actual logger
 class Logger:
     def log(self, line):
-        print line
+        print(line)
 
 class Tracer:
     def __init__(self):
@@ -55,7 +55,7 @@ class Tracer:
         payload = {"jsonrpc":"2.0", "method":"debug_traceTransaction", "params":[txn_hash, options], "id": 1}
         request = requests.post(self.endpoint, json=payload)
         response = request.json()
-        print response
+        print(response)
         return response["result"]
 
     def get_transactions(self, block):
@@ -69,13 +69,13 @@ class Tracer:
     def trace_and_store_block(self, block):
         txn_hashes = self.get_transactions(block)
         traces = self.process_pool.map(self.trace_transaction, txn_hashes)
-        base64_trace_strings = {txn_hashes[i]: traces[i] for i in xrange(len(txn_hashes))}
+        base64_trace_strings = {txn_hashes[i]: traces[i] for i in range(len(txn_hashes))}
         self.db.store_block(block, base64_trace_strings)
 
 if __name__ == "__main__":
     tr = Tracer()
     # 46147 contains the first Ethereum transaction
-    for b in xrange(525700, 525710):
-        print b
-        print tr.trace_and_store_block(b)
+    for b in range(525700, 525710):
+        print(b)
+        print(tr.trace_and_store_block(b))
 

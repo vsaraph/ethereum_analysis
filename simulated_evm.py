@@ -120,7 +120,7 @@ class SimulatedEVM:
         stats = (self.block, aborts, total_txns, percentage_tx, message_calls, percentage_mc)
         stats += (sequential_phase_work, parallel_phase_work, sequential_evm_work, speedup)
         stats += (self.perfect_speedup(),)
-        print self.unique_contract_ratio()
+        print(self.unique_contract_ratio())
 
         open(filename, 'a').write(format_str % stats)
 

@@ -1,0 +1,2 @@
+db_file: test.db
+geth_json_rpc_endpoint: 
